@@ -1,0 +1,5 @@
+1. lhe to slic - lhe converted to stdhep - slic makes magnetic feild
+2. slic to reconstruction 
+
+All HPS MC
+file: 2019_mc_prod_majd

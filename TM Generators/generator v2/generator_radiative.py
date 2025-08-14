@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import gzip
+import math
 from pathlib import Path
 
 # -------------------
@@ -8,38 +9,71 @@ from pathlib import Path
 # -------------------
 np.random.seed(42)
 
-# Beam / masses (MeV)
-E_beam = 3740.0       # HPS ~3.74 GeV
-M_TM   = 211.0        # TM rest mass ~ 2 m_mu
-m_mu   = 105.658      # muon mass
-m_e    = 0.510999     # electron mass
+# Constants for radiative production
+A = 183.84  # atomic mass units
+Lambda = 405 / (A ** (1/3))  # MeV
+m_mu = 105.658  # muon mass (MeV)
+m_e = 0.510999  # electron mass (MeV)
+n = 1  # principal quantum number
+alpha = 7.297e-3  # fine structure constant
+B = 0.85
+E_beam = 3740.0  # MeV (~3.74 GeV)
+Z = 74  # tungsten target for HPS
+
+# TM rest mass ~ 2 m_mu
+M_TM = 211.0  # TM rest mass ~ 2 m_mu
 
 # Physics / modeling knobs
-Lambda_ang = 20.0     # MeV, sets production-angle width ~ Lambda/(x * E_beam)
-tau_0 = 1.8e-12       # s, TM lifetime in rest frame (not used in LHE here)
-c = 3.0e8             # m/s
+Lambda_ang = Lambda  # MeV, using the calculated Lambda value
+tau_0 = 1.8e-12  # s, TM lifetime in rest frame (not used in LHE here)
+c = 3.0e8  # m/s
 
 # Event counts
-N_events = 100  # total MC events to generate
+N_events = 100_000  # total MC events to generate
 N_LHE_WRITE = N_events  # how many to write into the LHE
 
 # LHE output
 WRITE_GZIP = True
-OUTFILE = "tm_3gamma_noaccept.lhe.gz" if WRITE_GZIP else "tm_3gamma_noaccept.lhe"
+OUTFILE = Path(__file__).parent / ("tm_radiative_noaccept.lhe.gz" if WRITE_GZIP else "tm_radiative_noaccept.lhe")
 
 # QA plots (no acceptance)
 MAKE_QA_PLOTS = True
 
 # -------------------
-# 3γ dσ/dx (shape only)
-# dσ/dx ∝ (1/x) * [ (1 - x + x^2/2) * ln(((1-x)*m_mu^2)/(x^2*m_e^2)) - 1 + x ]
+# Radiative dσ/dx (complete calculation)
+# Includes nuclear form factors and atomic screening for tungsten target
 # -------------------
-def three_gamma_dsigma_dx_shape(x):
+def radiative_cross_section(x):
+    """
+    Calculate dσ for radiative production for a given x.
+    x is the fraction of beam energy carried by the true muonium.
+    """
     x = np.asarray(x)
-    ratio = ((1.0 - x) * (m_mu**2)) / (x**2 * (m_e**2))
-    term  = (1.0 - x + 0.5*x**2) * np.log(ratio) - 1.0 + x
-    fx = (1.0 / x) * term
-    return np.clip(fx, 0.0, None)
+    
+    # Handle array input
+    result = np.zeros_like(x)
+    valid_mask = (x > 0) & (x < 1)
+    
+    if not np.any(valid_mask):
+        return result
+    
+    x_valid = x[valid_mask]
+    
+    numerator = (Z**2) * (alpha**7) * x_valid * (1 - x_valid) * (1 - x_valid + (1/3) * x_valid**2)
+    denominator = ((1 - x_valid + (m_e / m_mu)**2)**2)
+
+    prefactor = (1 / (4 * (n**3))) * (numerator / (m_mu**2 * denominator))
+
+    log_arg = ((E_beam / m_mu)**2 * (1 - x_valid)**2) / (1 - x_valid + (m_e / m_mu)**2)
+    log_term = np.log(log_arg) - 1
+
+    result[valid_mask] = prefactor * log_term
+    
+    return np.clip(result, 0.0, None)
+
+# Keep the old function name for compatibility with existing code
+def dsigma_dx(x):
+    return radiative_cross_section(x)
 
 # -------------------
 # Sample x from the correct distribution (inverse-CDF via table)
@@ -49,7 +83,7 @@ x_max = 1.0 - 1e-6
 
 grid_size = 200_000
 x_grid = np.linspace(x_min, x_max, grid_size)
-pdf_grid = three_gamma_dsigma_dx_shape(x_grid)
+pdf_grid = radiative_cross_section(x_grid)
 cdf_grid = np.cumsum(pdf_grid)
 cdf_grid /= cdf_grid[-1]
 
@@ -113,6 +147,24 @@ E_eplus,  p_eplus  = boost(p_decay,          E_e_star, beta, n_TM, gamma)
 E_eminus, p_eminus = boost(p_decay_opposite, E_e_star, beta, n_TM, gamma)
 
 # -------------------
+# Calculate total cross section
+# -------------------
+def calculate_total_cross_section():
+    """Calculate the total cross section by integrating dσ/dx"""
+    x_fine = np.linspace(x_min, x_max, 10000)
+    dsigma_dx_values = radiative_cross_section(x_fine)
+    total_sigma = np.trapz(dsigma_dx_values, x_fine)
+    return total_sigma
+
+# Calculate and print cross section information
+total_sigma = calculate_total_cross_section()
+print(f"Total radiative → TM cross section: {total_sigma:.2e} MeV⁻²")
+print(f"Total radiative → TM cross section: {total_sigma * 1e-28:.2e} barns")
+print(f"Target: Tungsten (Z={Z}, A={A})")
+print(f"Beam energy: {E_beam} MeV")
+print(f"Lambda: {Lambda:.3f} MeV")
+
+# -------------------
 # (Optional) QA plots — no cuts applied anywhere
 # -------------------
 if MAKE_QA_PLOTS:
@@ -121,15 +173,15 @@ if MAKE_QA_PLOTS:
     bins = np.linspace(x_min, x_max, 120)
     hist, edges = np.histogram(x, bins=bins, density=True)
     centers = 0.5*(edges[:-1] + edges[1:])
-    theory = three_gamma_dsigma_dx_shape(centers)
+    theory = radiative_cross_section(centers)
     theory /= np.trapezoid(theory, centers)
     plt.step(centers, hist, where='mid', label='Sampled x (density)')
     xf = np.linspace(x_min, x_max, 2000)
-    tf = three_gamma_dsigma_dx_shape(xf); tf /= np.trapezoid(tf, xf)
+    tf = radiative_cross_section(xf); tf /= np.trapezoid(tf, xf)
     plt.plot(xf, tf, label='Theory dσ/dx (norm.)')
     plt.xlabel('x = E_TM / E_beam'); plt.ylabel('PDF (arb.)')
-    plt.title('3γ production: x distribution (no cuts)')
-    plt.legend(); plt.tight_layout(); plt.savefig('qa_x_pdf.png'); plt.close()
+    plt.title('Radiative production: x distribution (W target, no cuts)')
+    plt.legend(); plt.tight_layout(); plt.savefig(Path(__file__).parent / 'qa_radiative_x_pdf.png'); plt.close()
 
     # x CDF check
     plt.figure(figsize=(8,5))
@@ -138,7 +190,7 @@ if MAKE_QA_PLOTS:
     plt.plot(xs, ys, alpha=0.7, label='Empirical CDF')
     plt.xlabel('x'); plt.ylabel('CDF'); plt.legend()
     plt.title('x CDF (samples vs theory)'); plt.tight_layout()
-    plt.savefig('qa_x_cdf.png'); plt.close()
+    plt.savefig(Path(__file__).parent / 'qa_radiative_x_cdf.png'); plt.close()
 
     # e± lab polar angle (vertical-angle proxy) — purely for inspection
     def vert_angle(p):
@@ -150,14 +202,14 @@ if MAKE_QA_PLOTS:
     plt.figure(figsize=(8,5))
     plt.hist(th_ep, bins=150)
     plt.xlabel('e⁺ vertical angle (mrad)'); plt.ylabel('Events / bin')
-    plt.title('e⁺ vertical angle (no acceptance)'); plt.tight_layout()
-    plt.savefig('qa_theta_ep_mrad.png'); plt.close()
+    plt.title('e⁺ vertical angle (radiative, no acceptance)'); plt.tight_layout()
+    plt.savefig(Path(__file__).parent / 'qa_radiative_theta_ep_mrad.png'); plt.close()
 
     plt.figure(figsize=(8,5))
     plt.hist(th_em, bins=150)
     plt.xlabel('e⁻ vertical angle (mrad)'); plt.ylabel('Events / bin')
-    plt.title('e⁻ vertical angle (no acceptance)'); plt.tight_layout()
-    plt.savefig('qa_theta_em_mrad.png'); plt.close()
+    plt.title('e⁻ vertical angle (radiative, no acceptance)'); plt.tight_layout()
+    plt.savefig(Path(__file__).parent / 'qa_radiative_theta_em_mrad.png'); plt.close()
 
 # -------------------
 # LHE writing (final-state e+ e- only, GeV units)
@@ -176,8 +228,12 @@ encoding = 'utf-8'
 with open_fn(OUTFILE, mode, encoding=encoding) as f:
     f.write("<LesHouchesEvents version=\"1.0\">\n")
     f.write("<header>\n")
-    f.write("  TM -> e+ e- (3γ production), no acceptance/geometry\n")
+    f.write("  TM -> e+ e- (radiative production on W target), no acceptance/geometry\n")
     f.write("  Units: GeV. Status=1 for final-state particles.\n")
+    f.write(f"  Target: Tungsten (Z={Z}, A={A})\n")
+    f.write(f"  Beam energy: {E_beam} MeV\n")
+    f.write(f"  Total cross section: {total_sigma:.2e} MeV⁻²\n")
+    f.write(f"  Lambda: {Lambda:.3f} MeV\n")
     f.write("</header>\n")
     # Keep a minimal <init>. Many readers ignore this, but we mirror your previous pattern.
     f.write("<init>\n")
